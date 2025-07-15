@@ -1,0 +1,4 @@
+PyPDF2
+pandas
+openpyxl        # pandas needs this for Excel files
+pytest        
