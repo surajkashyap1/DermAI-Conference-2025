@@ -2,3 +2,9 @@ PyPDF2
 pandas
 openpyxl        # pandas needs this for Excel files
 pytest        
+streamlit
+langchain
+langchain-openai # 
+langchain_community
+gtts
+SpeechRecognition

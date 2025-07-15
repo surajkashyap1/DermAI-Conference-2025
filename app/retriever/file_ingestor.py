@@ -1,94 +1,120 @@
-from pathlib import Path
-from typing import List, Dict
+"""
+app/retriever/file_ingestor.py
+──────────────────────────────
+Format‑agnostic loader used by unit‑tests and the RAG pipeline.
+
+Returns: List[dict] – each element is
+    {
+        "text": "<chunk‑or‑row‑content>",
+        "meta": {...rich metadata...}
+    }
+"""
+
+from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any, Dict, List
+
 import pandas as pd
+from PyPDF2 import PdfReader
 
-# --- existing PDF helper you copied over ---
-from .pdf_loader import load_pdf
+# ────────────────────────────────────────────────────────────────────────────────
+# PDF
+# ────────────────────────────────────────────────────────────────────────────────
+def load_pdf(path: Path) -> List[Dict[str, Any]]:
+    reader = PdfReader(str(path))
+    docs: List[Dict[str, Any]] = []
+
+    for page_num, page in enumerate(reader.pages, start=1):
+        text = page.extract_text()
+        if text and text.strip():
+            docs.append(
+                {
+                    "text": text,
+                    "meta": {
+                        "source_type": "pdf",
+                        "file_name": path.name,
+                        "page": page_num,
+                    },
+                }
+            )
+    return docs
 
 
-def _json_to_docs(path: Path) -> List[Dict]:
-    """
-    Expect a list/array of objects or NDJSON (one JSON obj per line)
-    """
-    docs: List[Dict] = []
-    with open(path, "r", encoding="utf-8") as f:
-        first_char = f.read(1)
-        f.seek(0)
+# ────────────────────────────────────────────────────────────────────────────────
+# CSV & Excel
+# ────────────────────────────────────────────────────────────────────────────────
+def load_csv_excel(path: Path) -> List[Dict[str, Any]]:
+    if path.suffix.lower() == ".csv":
+        frames = {"__csv__": pd.read_csv(path)}
+        src_type = "spreadsheet" 
+    else:  # .xlsx / .xls
+        frames = pd.read_excel(path, sheet_name=None)
+        src_type = "spreadsheet"
 
-        # NDJSON (newline‑delimited)
-        if first_char and first_char not in "[{":
-            for line in f:
-                obj = json.loads(line)
+    docs: List[Dict[str, Any]] = []
+    for sheet, df in frames.items():
+        for idx, row in df.iterrows():
+            text = " ".join(map(str, row.dropna().values))
+            if text.strip():
                 docs.append(
                     {
-                        "text": json.dumps(obj, ensure_ascii=False, indent=2),
-                        "meta": {"source_type": "json", "file_name": path.name},
-                    }
-                )
-        else:  # normal JSON array or object
-            data = json.load(f)
-            if isinstance(data, list):
-                for obj in data:
-                    docs.append(
-                        {
-                            "text": json.dumps(obj, ensure_ascii=False, indent=2),
-                            "meta": {"source_type": "json", "file_name": path.name},
-                        }
-                    )
-            else:
-                docs.append(
-                    {
-                        "text": json.dumps(data, ensure_ascii=False, indent=2),
-                        "meta": {"source_type": "json", "file_name": path.name},
+                        "text": text,
+                        "meta": {
+                            "source_type": src_type,
+                            "file_name": path.name,
+                            "sheet": None if sheet == "__csv__" else sheet,
+                            "row": int(idx),
+                        },
                     }
                 )
     return docs
 
 
-def _spreadsheet_to_docs(path: Path) -> List[Dict]:
-    """
-    Convert CSV / Excel cells to a single plain‑text blob per row.
-    """
-    df = (
-        pd.read_csv(path)
-        if path.suffix.lower() == ".csv"
-        else pd.read_excel(path, sheet_name=None)  # all sheets
-    )
+# ────────────────────────────────────────────────────────────────────────────────
+# JSON & NDJSON
+# ────────────────────────────────────────────────────────────────────────────────
+def load_json(path: Path) -> List[Dict[str, Any]]:
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".ndjson":
+        records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    else:
+        records = json.loads(raw)
+        if isinstance(records, dict):  # single object
+            records = [records]
 
-    if isinstance(df, dict):  # excel returns dict of DataFrames
-        frames = []
-        for sheet_name, sheet_df in df.items():
-            sheet_df["__sheet__"] = sheet_name
-            frames.append(sheet_df)
-        df = pd.concat(frames, ignore_index=True)
-
-    docs: List[Dict] = []
-    for _, row in df.iterrows():
-        text = " | ".join([f"{col}: {row[col]}" for col in df.columns])
+    docs: List[Dict[str, Any]] = []
+    for idx, rec in enumerate(records):
         docs.append(
             {
-                "text": text,
+                "text": json.dumps(rec, ensure_ascii=False),
                 "meta": {
-                    "source_type": "spreadsheet",
+                    "source_type": "json",
                     "file_name": path.name,
+                    "record": idx,
                 },
             }
         )
     return docs
 
 
-def ingest(path: Path) -> List[Dict]:
+# ────────────────────────────────────────────────────────────────────────────────
+# Public API
+# ────────────────────────────────────────────────────────────────────────────────
+def ingest(path: Path) -> List[Dict[str, Any]]:
     """
-    Return a list of dicts: {"text": str, "meta": {...}}
+    One‑shot helper used by tests:
+
+        docs = ingest(Path("sample.pdf"))
     """
     suffix = path.suffix.lower()
+
     if suffix == ".pdf":
         return load_pdf(path)
-    elif suffix in {".json", ".ndjson"}:
-        return _json_to_docs(path)
     elif suffix in {".csv", ".xlsx", ".xls"}:
-        return _spreadsheet_to_docs(path)
+        return load_csv_excel(path)
+    elif suffix in {".json", ".ndjson"}:
+        return load_json(path)
     else:
-        raise ValueError(f"Unsupported file type: {path}")
+        raise ValueError(f"Unsupported file type: {suffix}")
